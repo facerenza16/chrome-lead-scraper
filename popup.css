@@ -261,40 +261,66 @@ body.state-error .error-msg { display: block; }
   background: rgba(63, 185, 80, 0.15);
   color: var(--green);
   border: 1px solid rgba(63, 185, 80, 0.3);
-  flex: 2;
 }
 .btn-export:hover:not(:disabled) { background: rgba(63, 185, 80, 0.22); }
+
+.btn-export-secondary {
+  background: transparent;
+  color: var(--green);
+  border: 1px solid rgba(63, 185, 80, 0.3);
+}
+.btn-export-secondary:hover:not(:disabled) { background: rgba(63, 185, 80, 0.1); }
 
 .btn-ghost {
   background: transparent;
   color: var(--text-muted);
   border: 1px solid var(--border);
-  flex: 1;
 }
 .btn-ghost:hover:not(:disabled) { color: var(--text); border-color: var(--text-muted); }
+
+.btn-clear {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+.btn-clear:hover:not(:disabled) { color: var(--red); border-color: rgba(248, 81, 73, 0.4); background: rgba(248, 81, 73, 0.06); }
 
 /* ── Visibility por estado ───────────────────────────── */
 
 /* Defaults */
 #btn-stop    { display: none; }
-#btn-export  { display: none; }
+#btn-export-excel { display: none; }
+#btn-export-csv { display: none; }
 #btn-clear   { display: none; }
 .actions-secondary { display: none; }
+.actions-clear { display: none; }
 
 /* Raspando */
 body.state-raspando #btn-scrape  { display: none; }
 body.state-raspando #btn-stop    { display: inline-flex; }
 
-/* Completado */
+/* Deteniendo (esperando cierre de búsqueda / enrich final) */
+body.state-deteniendo #btn-scrape { display: none; }
+body.state-deteniendo #btn-stop   { display: inline-flex; }
+
+/* Cancelado */
 body.state-cancelado .actions-secondary { display: flex; }
-body.state-cancelado #btn-export { display: inline-flex; }
-body.state-cancelado #btn-clear  { display: inline-flex; }
+body.state-cancelado #btn-export-excel  { display: inline-flex; }
+body.state-cancelado #btn-export-csv    { display: inline-flex; }
+body.state-cancelado .actions-clear     { display: flex; }
+body.state-cancelado #btn-clear         { display: inline-flex; }
+
+/* Completado */
 body.state-completado .actions-secondary { display: flex; }
-body.state-completado #btn-export { display: inline-flex; }
-body.state-completado #btn-clear  { display: inline-flex; }
+body.state-completado #btn-export-excel  { display: inline-flex; }
+body.state-completado #btn-export-csv    { display: inline-flex; }
+body.state-completado .actions-clear     { display: flex; }
+body.state-completado #btn-clear         { display: inline-flex; }
 
 /* Error */
-body.state-error #btn-export { display: none; }
+body.state-error #btn-export-excel { display: none; }
+body.state-error #btn-export-csv   { display: none; }
 
 /* ── Toggle Email ────────────────────────────────────── */
 .option-row {
@@ -335,3 +361,23 @@ body.state-enriqueciendo .progress-bar-wrap { opacity: 1; }
 body.state-enriqueciendo #btn-scrape        { display: none; }
 body.state-enriqueciendo #btn-stop          { display: inline-flex; }
 body.state-enriqueciendo .leads-preview     { display: flex; }
+
+/* ── Reportar error ──────────────────────────────────── */
+.actions-report {
+  display: flex;
+  justify-content: center;
+  margin-top: 6px;
+}
+
+.btn-report {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font);
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 4px 0;
+  transition: color 0.15s;
+}
+.btn-report:hover { color: var(--text); }

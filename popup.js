@@ -9,14 +9,40 @@ const els = {
   errorMsg:      $('error-msg'),
   btnScrape:     $('btn-scrape'),
   btnStop:       $('btn-stop'),
-  btnExport:     $('btn-export'),
+  btnExportExcel:$('btn-export-excel'),
+  btnExportCsv:  $('btn-export-csv'),
   btnClear:      $('btn-clear'),
+  btnReport:     $('btn-report'),
   panelMain:     $('panel-main'),
   panelNoMaps:   $('panel-no-maps'),
   toggleEmail:   $('toggle-email'),
 };
 
 let cachedLeads = [];
+
+// ── Reporte de errores (Google Form) ───────────────────
+// Reemplazar REPORT_FORM_URL con la URL real del form después de crearlo.
+// Para obtener los entry IDs: abrir el form → "⋮" → "Obtener enlace pre-llenado"
+// → completar los campos → copiar la URL generada.
+const REPORT_FORM_URL = 'https://docs.google.com/forms/d/e/TU_FORM_ID/viewform';
+const REPORT_FIELDS = {
+  version:       'entry.XXXXXXXXXX',  // campo "Versión"
+  selectorHealth:'entry.XXXXXXXXXX',  // campo "Estado de selectores"
+  sessionInfo:   'entry.XXXXXXXXXX',  // campo "Información de sesión"
+};
+
+const EXPORT_COLUMNS = [
+  { header: 'Nombre', key: 'nombre', width: 220 },
+  { header: 'Categoría', key: 'categoria', width: 140 },
+  { header: 'Calificación', key: 'calificacion', width: 90 },
+  { header: 'Reseñas', key: 'resenas', width: 90 },
+  { header: 'Dirección', key: 'direccion', width: 240 },
+  { header: 'Teléfono', key: 'telefono', width: 130 },
+  { header: 'Sitio Web', key: 'sitio_web', width: 220, isLink: true },
+  { header: 'Email', key: 'email', width: 200 },
+  { header: 'URL Maps', key: 'url_maps', width: 260, isLink: true },
+  { header: 'Fecha', key: 'fecha_scraping', width: 95 },
+];
 
 // ── Estado visual ──────────────────────────────────────
 
@@ -26,6 +52,7 @@ function setState(state, opts = {}) {
   const messages = {
     default:        'Listo para raspar',
     raspando:       'Raspando resultados…',
+    deteniendo:     'Deteniendo búsqueda y finalizando leads encontrados…',
     enriqueciendo:  opts.total
                       ? `Enriqueciendo ${opts.current}/${opts.total}…`
                       : 'Enriqueciendo resultados…',
@@ -62,6 +89,10 @@ function renderPreview(leads) {
 
 function escapeHtml(str) {
   return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function escapeHtmlAttr(str) {
+  return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // ── Init: leer estado persistido ───────────────────────
@@ -152,10 +183,15 @@ els.btnScrape.addEventListener('click', async () => {
 els.btnStop.addEventListener('click', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: 'STOP_SCRAPE' });
-  setState('cancelado', { count: cachedLeads.length });
+  setState('deteniendo');
 });
 
-els.btnExport.addEventListener('click', () => {
+els.btnExportExcel.addEventListener('click', () => {
+  if (!cachedLeads.length) return;
+  exportToExcel(cachedLeads);
+});
+
+els.btnExportCsv.addEventListener('click', () => {
   if (!cachedLeads.length) return;
   exportToCSV(cachedLeads);
 });
@@ -168,25 +204,91 @@ els.btnClear.addEventListener('click', async () => {
   setState('default');
 });
 
+els.btnReport.addEventListener('click', async () => {
+  const { selectorHealth, scrapeState, leads } = await chrome.storage.local.get(
+    ['selectorHealth', 'scrapeState', 'leads']
+  );
+  const params = new URLSearchParams({
+    [REPORT_FIELDS.version]: chrome.runtime.getManifest().version,
+    [REPORT_FIELDS.selectorHealth]: selectorHealth
+      ? `${selectorHealth.status} | emptyName: ${selectorHealth.emptyNamePct}% | muestra: ${selectorHealth.sampleSize} | ${selectorHealth.checkedAt}`
+      : 'no disponible',
+    [REPORT_FIELDS.sessionInfo]: `Estado: ${scrapeState?.status ?? 'n/a'} | Leads: ${leads?.length ?? 0}`,
+  });
+  chrome.tabs.create({ url: `${REPORT_FORM_URL}?usp=pp_url&${params.toString()}` });
+});
+
 // ── Exportar CSV ───────────────────────────────────────
 
 function exportToCSV(leads) {
-  const headers = ['Nombre', 'Categoría', 'Calificación', 'Reseñas', 'Dirección',
-                   'Teléfono', 'Sitio Web', 'Email', 'URL Maps', 'Fecha'];
   const rows = leads.map(lead =>
-    [lead.nombre, lead.categoria, lead.calificacion, lead.resenas, lead.direccion,
-     lead.telefono, lead.sitio_web, lead.email, lead.url_maps, lead.fecha_scraping]
+    EXPORT_COLUMNS.map(column => lead[column.key] || '')
     .map(val => `"${(val || '').replace(/"/g, '""')}"`)
     .join(',')
   );
-  const csv = '\uFEFF' + [headers.join(','), ...rows].join('\n');
+  const csv = '\uFEFF' + [EXPORT_COLUMNS.map(column => column.header).join(','), ...rows].join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
+  downloadBlob(url, `leads_maps_${new Date().toISOString().split('T')[0]}.csv`);
+  URL.revokeObjectURL(url);
+}
+
+function exportToExcel(leads) {
+  const ROW_HEIGHT_PX = 24;
+  const colGroup = EXPORT_COLUMNS
+    .map(column => `<col style="width:${column.width}px;">`)
+    .join('');
+  const headerRow = EXPORT_COLUMNS
+    .map(column => `<th style="width:${column.width}px;">${escapeHtml(column.header)}</th>`)
+    .join('');
+  const bodyRows = leads.map(lead => {
+    const cells = EXPORT_COLUMNS
+      .map(column => {
+        const value = lead[column.key] || '';
+
+        if (column.isLink && value) {
+          const safeUrl = escapeHtmlAttr(value);
+          return `<td style="width:${column.width}px;"><a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${escapeHtml(value)}</a></td>`;
+        }
+
+        return `<td style="width:${column.width}px;">${escapeHtml(value)}</td>`;
+      })
+      .join('');
+    return `<tr style="height:${ROW_HEIGHT_PX}px;">${cells}</tr>`;
+  }).join('');
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    table { border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12px; table-layout: fixed; }
+    tr { height: ${ROW_HEIGHT_PX}px; }
+    th, td { border: 1px solid #d0d7de; padding: 6px 8px; text-align: left; vertical-align: top; height: ${ROW_HEIGHT_PX}px; box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    th { font-weight: 700; background: #f6f8fa; }
+    a { color: #0969da; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <table>
+    <colgroup>${colGroup}</colgroup>
+    <thead><tr style="height:${ROW_HEIGHT_PX}px;">${headerRow}</tr></thead>
+    <tbody>${bodyRows}</tbody>
+  </table>
+</body>
+</html>`;
+
+  const blob = new Blob(['\uFEFF', html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  downloadBlob(url, `leads_maps_${new Date().toISOString().split('T')[0]}.xls`);
+  URL.revokeObjectURL(url);
+}
+
+function downloadBlob(url, filename) {
   const a = document.createElement('a');
   a.href = url;
-  a.download = `leads_maps_${new Date().toISOString().split('T')[0]}.csv`;
+  a.download = filename;
   a.click();
-  URL.revokeObjectURL(url);
 }
 
 // ── Arrancar ───────────────────────────────────────────

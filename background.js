@@ -124,5 +124,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     chrome.runtime.sendMessage(msg).catch(() => {});
   }
 
+  if (msg.type === 'SELECTOR_HEALTH') {
+    chrome.storage.local.set({ selectorHealth: msg.health });
+  }
+
   sendResponse({ ok: true });
 });

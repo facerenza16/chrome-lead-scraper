@@ -17,9 +17,23 @@ const SELECTORS = {
 
 let isRunning = false;
 let cancelRequested = false;
+let stopRequested = false;
+let currentPhase = 'idle';
 
 const DETAIL_WAIT_MS = 2000;
 const BACK_WAIT_MS   = 1500;
+
+function checkSelectorHealth(leads) {
+  if (leads.length < 3) return { status: 'insufficient_sample', sampleSize: leads.length };
+  const emptyName = leads.filter(l => !l.nombre).length;
+  const emptyNamePct = Math.round((emptyName / leads.length) * 100);
+  return {
+    status: emptyNamePct > 50 ? 'degraded' : 'ok',
+    checkedAt: new Date().toISOString(),
+    sampleSize: leads.length,
+    emptyNamePct,
+  };
+}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -27,6 +41,10 @@ function sleep(ms) {
 
 function isCancelled() {
   return cancelRequested;
+}
+
+function shouldStopScraping() {
+  return cancelRequested || stopRequested;
 }
 
 function buildExportLeads(leads) {
@@ -41,11 +59,110 @@ function buildExportLeads(leads) {
 
 function finishCanceled(leads) {
   isRunning = false;
+  currentPhase = 'idle';
   chrome.runtime.sendMessage({
     type: 'SCRAPE_CANCELED',
     leads: buildExportLeads(leads),
     count: leads.length,
   });
+}
+
+function extractCategoryAndAddress(card, rating, reviews) {
+  function normalizeText(value) {
+    return (value || '')
+      .replace(/\u00b7/g, '•')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function isPriceToken(value) {
+    if (!value) return false;
+    const v = normalizeText(value).toLowerCase();
+    if (!v) return false;
+
+    if (/^[\$€£¥]{1,5}$/.test(v)) return true; // $, $$, $$$...
+    if (/(precio|price|rango de precios|price range)/i.test(v)) return true;
+    if (/^[\$€£¥]\s?\d/.test(v)) return true; // $10, € 20
+    if (/^\d+\s?[-–]\s?\d+\s?[\$€£¥]?$/.test(v)) return true; // 10-20 / 10-20$
+
+    return false;
+  }
+
+  function isLikelyAddressToken(value) {
+    if (!value) return false;
+    const v = normalizeText(value);
+    if (!v) return false;
+
+    // Señales comunes de dirección en Maps (español / inglés)
+    if (/\d/.test(v)) return true;
+    if (/(av\.?|avenida|calle|ruta|km|piso|local|esquina|boulevard|blvd|street|st\.?|road|rd\.?|avenue|ave\.?|drive|dr\.?|lane|ln\.?)/i.test(v)) return true;
+
+    return false;
+  }
+
+  function escapeRegex(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function cleanMetaToken(token, ratingValue, reviewsValue) {
+    let cleaned = normalizeText(token);
+    if (!cleaned) return '';
+
+    const patterns = [];
+
+    if (ratingValue) {
+      patterns.push(new RegExp(`^${escapeRegex(ratingValue)}\\s*`));
+    }
+
+    if (reviewsValue) {
+      patterns.push(new RegExp(`^\\(?${escapeRegex(reviewsValue)}\\)?\\s*`));
+    }
+
+    // Casos donde Google pega rating + reseñas al inicio: "4.5(128) Restaurant"
+    patterns.push(/^\d(?:[.,]\d)?\s*\(\s*[\d.,]+\s*\)\s*/);
+    patterns.push(/^\d(?:[.,]\d)?\s*[\d.,]+\s*/);
+
+    let previous = null;
+    while (cleaned && cleaned !== previous) {
+      previous = cleaned;
+      for (const pattern of patterns) {
+        cleaned = cleaned.replace(pattern, '').trim();
+      }
+    }
+
+    return cleaned;
+  }
+
+  const metaBlocks = Array.from(card.querySelectorAll('.W4Efsd'))
+    .filter(el => !el.closest('.W4Efsd .W4Efsd'));
+
+  for (const block of metaBlocks) {
+    const text = normalizeText(block.textContent);
+
+    if (!text) continue;
+
+    const parts = text
+      .split('•')
+      .map(part => cleanMetaToken(part, rating, reviews))
+      .filter(Boolean)
+      .filter(part => !isPriceToken(part));
+
+    if (!parts.length) continue;
+    const categoria = parts.find(part => !isLikelyAddressToken(part)) || parts[0] || '';
+    const direccion = parts.find((part, index) => index > parts.indexOf(categoria) && isLikelyAddressToken(part))
+      || parts.filter(part => part !== categoria).find(isLikelyAddressToken)
+      || '';
+
+    return {
+      categoria,
+      direccion,
+    };
+  }
+
+  return {
+    categoria: card.querySelector(SELECTORS.category)?.textContent.trim() || '',
+    direccion: card.querySelector(SELECTORS.address)?.textContent.trim() || '',
+  };
 }
 
 function extractLeadsFromDOM() {
@@ -58,10 +175,7 @@ function extractLeadsFromDOM() {
 
     const rating = card.querySelector(SELECTORS.rating)?.textContent.trim() || '';
     const resenas = card.querySelector(SELECTORS.reviews)?.textContent.trim().replace(/[()]/g, '') || '';
-    const categoryEl = card.querySelector(SELECTORS.category);
-    const addressEl = card.querySelector(SELECTORS.address);
-    const categoria = categoryEl?.textContent.trim() || '';
-    const direccion = addressEl?.textContent.trim() || '';
+    const { categoria, direccion } = extractCategoryAndAddress(card, rating, resenas);
     const url_maps = card.querySelector(SELECTORS.url)?.href || '';
     const fecha_scraping = new Date().toISOString().split('T')[0];
 
@@ -169,10 +283,12 @@ async function scrapeWithScroll(fetchEmail) {
   let seenUrls = new Set();
   let noNewCount = 0;
   const MAX_NO_NEW = 4;
+  let healthChecked = false;
 
+  currentPhase = 'scraping';
   chrome.runtime.sendMessage({ type: 'SCRAPE_STATUS', status: 'raspando', count: 0 });
 
-  while (!isCancelled()) {
+  while (!shouldStopScraping()) {
     const current = extractLeadsFromDOM();
     let newCount = 0;
 
@@ -185,6 +301,12 @@ async function scrapeWithScroll(fetchEmail) {
     });
 
     chrome.runtime.sendMessage({ type: 'SCRAPE_STATUS', status: 'raspando', count: allLeads.length });
+
+    if (!healthChecked && allLeads.length >= 3) {
+      const health = checkSelectorHealth(allLeads);
+      chrome.runtime.sendMessage({ type: 'SELECTOR_HEALTH', health });
+      healthChecked = true;
+    }
 
     if (newCount === 0) {
       noNewCount++;
@@ -202,6 +324,12 @@ async function scrapeWithScroll(fetchEmail) {
     return;
   }
 
+  if (stopRequested && !fetchEmail) {
+    finishCanceled(allLeads);
+    return;
+  }
+
+  currentPhase = 'enriching';
   chrome.runtime.sendMessage({
     type: 'SCRAPE_STATUS', status: 'enriqueciendo',
     current: 0, total: allLeads.length, count: allLeads.length,
@@ -214,11 +342,17 @@ async function scrapeWithScroll(fetchEmail) {
     return;
   }
 
+  if (stopRequested) {
+    finishCanceled(allLeads);
+    return;
+  }
+
   const finalLeads = fetchEmail
     ? allLeads.filter(l => !l._skip)
     : allLeads;
 
   isRunning = false;
+  currentPhase = 'idle';
   chrome.runtime.sendMessage({
     type: 'SCRAPE_DONE',
     leads: buildExportLeads(finalLeads),
@@ -234,8 +368,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     isRunning = true;
     cancelRequested = false;
+    stopRequested = false;
+    currentPhase = 'scraping';
     scrapeWithScroll(msg.fetchEmail || false).catch(err => {
       isRunning = false;
+      currentPhase = 'idle';
       chrome.runtime.sendMessage({
         type: 'SCRAPE_ERROR',
         error: err?.message || 'Falló el raspado.',
@@ -245,7 +382,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'STOP_SCRAPE') {
-    cancelRequested = true;
+    if (currentPhase === 'enriching') {
+      cancelRequested = true;
+    } else {
+      stopRequested = true;
+    }
     sendResponse({ ok: true });
   }
 });
